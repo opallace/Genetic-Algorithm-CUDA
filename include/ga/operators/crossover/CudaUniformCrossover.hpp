@@ -2,7 +2,7 @@
 
 #include <curand_kernel.h>
 
-namespace ga::cuda::crossover {
+namespace ga::crossover {
 
     class CudaUniformCrossover {
         public:

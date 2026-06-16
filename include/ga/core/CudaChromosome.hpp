@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-namespace ga::cuda::core {
+namespace ga::core {
 
     template<typename GeneType>
     class CudaChromosome  {

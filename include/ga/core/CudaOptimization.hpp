@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ga::cuda::core {
+namespace ga::core {
 
     class CudaMaximize {
         public:

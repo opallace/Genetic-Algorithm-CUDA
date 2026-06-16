@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-namespace ga::cuda::selection {
+namespace ga::selection {
 
     class CudaTournamentSelection {
         public:

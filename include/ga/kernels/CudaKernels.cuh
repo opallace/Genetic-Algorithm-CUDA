@@ -5,10 +5,10 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
-#include "ga/cuda/core/CudaChromosome.hpp"
-#include "ga/cuda/utils/CudaCheck.hpp"
+#include "ga/core/CudaChromosome.hpp"
+#include "ga/utils/CudaCheck.cuh"
 
-namespace ga::cuda::kernels {
+namespace ga::kernels {
 
     __global__
     inline void setup_rng_kernel(
@@ -114,7 +114,7 @@ namespace ga::cuda::kernels {
             return;
         }
 
-        auto chromosome = ga::cuda::core::CudaChromosome<const GeneType>{
+        auto chromosome = ga::core::CudaChromosome<const GeneType>{
             &population[individual_id * chromosome_size],
             chromosome_size
         };
@@ -259,6 +259,7 @@ namespace ga::cuda::kernels {
     >
     __global__
     void crossover_mutation_kernel(
+        std::size_t generation,
         const GeneType* population,
         GeneType* next_population,
         const int* parent_a_indices,
@@ -289,7 +290,7 @@ namespace ga::cuda::kernels {
         curandState rng_state = rng_states[gene_id];
 
         GeneType child_allele = crossover(allele_a, allele_b, rng_state);
-                 child_allele = mutation(child_allele, rng_state);
+                 child_allele = mutation(generation, child_allele, rng_state);
 
         next_population[gene_id] = child_allele;
 
@@ -302,6 +303,7 @@ namespace ga::cuda::kernels {
         typename Mutation
     >
     void launch_crossover_mutation(
+        std::size_t generation,
         const GeneType* population,
         GeneType* next_population,
         const int* parent_a_indices,
@@ -321,6 +323,7 @@ namespace ga::cuda::kernels {
         );
 
         crossover_mutation_kernel<<<blocks, threads>>>(
+            generation,
             population,
             next_population,
             parent_a_indices,

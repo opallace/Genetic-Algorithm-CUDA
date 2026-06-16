@@ -1,0 +1,31 @@
+{
+    "configurations": [
+        {
+            "name": "Linux CUDA",
+            "compileCommands": [
+                "/home/wallace/Documentos/Genetic-Algorithm-CUDA/build/compile_commands.json"
+            ],
+            "includePath": [
+                "/home/wallace/Documentos/Genetic-Algorithm-CUDA/include",
+                "/usr/local/cuda/include",
+                "/opt/nvidia/hpc_sdk/Linux_x86_64/25.1/cuda/12.6/include"
+            ],
+            "defines": [
+                "__CUDACC__"
+            ],
+            "compilerPath": "/usr/bin/g++",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerPathInCppPropertiesJson": "/usr/bin/g++",
+            "compileCommandsInCppPropertiesJson": [
+                "/home/wallace/Documentos/Genetic-Algorithm-CUDA/build/compile_commands.json"
+            ],
+            "mergeConfigurations": false,
+            "recursiveIncludes": {},
+            "browse": {
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

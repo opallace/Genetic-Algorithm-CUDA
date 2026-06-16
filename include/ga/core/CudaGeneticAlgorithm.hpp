@@ -10,318 +10,403 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
-#include "ga/cuda/utils/CudaCheck.hpp"
-#include "ga/cuda/kernels/CudaKernels.cuh"
-#include "ga/cuda/concepts/CudaMutationConcept.hpp"
-#include "ga/cuda/concepts/CudaCrossoverConcept.hpp"
-#include "ga/cuda/concepts/CudaFitnessConcept.hpp"
-#include "ga/cuda/concepts/CudaSelectionConcept.hpp"
+#include "ga/utils/CudaCheck.cuh"
+#include "ga/kernels/CudaKernels.cuh"
+#include "ga/concepts/CudaMutationConcept.hpp"
+#include "ga/concepts/CudaCrossoverConcept.hpp"
+#include "ga/concepts/CudaSelectionConcept.hpp"
 
-namespace ga::cuda::core {
+namespace ga::core {
 
-template<
-    typename GeneType,
-    typename Mutation,
-    typename Crossover,
-    typename Selection,
-    typename Fitness,
-    typename Optimization
->
-requires
-    ga::cuda::concepts::CudaMutationConcept<Mutation, GeneType>   &&
-    ga::cuda::concepts::CudaCrossoverConcept<Crossover, GeneType> &&
-    ga::cuda::concepts::CudaSelectionConcept<Selection>           &&
-    ga::cuda::concepts::CudaFitnessConcept<
-        Fitness,
-        ga::cuda::core::CudaChromosome<const GeneType>
+    template<
+        typename GeneType,
+        typename Mutation,
+        typename Crossover,
+        typename Selection,
+        typename Optimization
     >
-class CudaGeneticAlgorithm {
-public:
-    CudaGeneticAlgorithm(
-        std::size_t population_size,
-        std::size_t chromosome_size,
-        Mutation mutation,
-        Crossover crossover,
-        Selection selection,
-        Fitness fitness,
-        Optimization optimization
-    )
-        : population_size(population_size),
-          chromosome_size(chromosome_size),
-          total_genes(population_size * chromosome_size),
-          pair_count(population_size / 2),
-          mutation(std::move(mutation)),
-          crossover(std::move(crossover)),
-          selection(std::move(selection)),
-          fitness(std::move(fitness)),
-          optimization(std::move(optimization))
-    {
-        if (population_size < 2) {
-            throw std::invalid_argument(
-                "Population size must be at least 2."
+    requires
+        ga::concepts::CudaMutationConcept<Mutation, GeneType>   &&
+        ga::concepts::CudaCrossoverConcept<Crossover, GeneType> &&
+        ga::concepts::CudaSelectionConcept<Selection>           
+    class CudaGeneticAlgorithm {
+    public:
+        CudaGeneticAlgorithm(
+            std::size_t population_size,
+            std::size_t chromosome_size,
+            Mutation mutation,
+            Crossover crossover,
+            Selection selection,
+            Optimization optimization
+        )
+            : population_size(population_size),
+            chromosome_size(chromosome_size),
+            total_genes(population_size * chromosome_size),
+            pair_count(population_size / 2),
+            mutation(std::move(mutation)),
+            crossover(std::move(crossover)),
+            selection(std::move(selection)),
+            optimization(std::move(optimization))
+        {
+            if (population_size < 2) {
+                throw std::invalid_argument(
+                    "Population size must be at least 2."
+                );
+            }
+
+            if (population_size % 2 != 0) {
+                throw std::invalid_argument(
+                    "CUDA GA currently requires even population size."
+                );
+            }
+
+            if (chromosome_size == 0) {
+                throw std::invalid_argument(
+                    "Chromosome size must be greater than 0."
+                );
+            }
+
+            allocate();
+        }
+
+        ~CudaGeneticAlgorithm() {
+            release();
+        }
+
+        CudaGeneticAlgorithm(const CudaGeneticAlgorithm&) = delete;
+        CudaGeneticAlgorithm& operator=(const CudaGeneticAlgorithm&) = delete;
+
+        void initialize_random(
+            GeneType min_value,
+            GeneType max_value,
+            unsigned long seed = 1234
+        ) {
+            ga::kernels::launch_setup_rng(
+                d_rng_states,
+                total_genes,
+                seed
+            );
+
+            ga::kernels::launch_initialize_population(
+                d_population,
+                d_rng_states,
+                total_genes,
+                min_value,
+                max_value
             );
         }
 
-        if (population_size % 2 != 0) {
-            throw std::invalid_argument(
-                "CUDA GA currently requires even population size."
+        template<typename Fitness>
+        void evaluate(Fitness fitness) {
+            ga::kernels::launch_evaluate_fitness(
+                d_population,
+                d_fitness_values,
+                population_size,
+                chromosome_size,
+                fitness
             );
         }
 
-        if (chromosome_size == 0) {
-            throw std::invalid_argument(
-                "Chromosome size must be greater than 0."
+        template<typename PopulationEvaluator>
+        void evaluate_with(PopulationEvaluator& evaluator) {
+            evaluator.evaluate_population(
+                d_population,
+                d_fitness_values,
+                population_size,
+                chromosome_size
             );
         }
 
-        allocate();
-    }
-
-    ~CudaGeneticAlgorithm() {
-        release();
-    }
-
-    CudaGeneticAlgorithm(const CudaGeneticAlgorithm&) = delete;
-    CudaGeneticAlgorithm& operator=(const CudaGeneticAlgorithm&) = delete;
-
-    void initialize_random(
-        GeneType min_value,
-        GeneType max_value,
-        unsigned long seed = 1234
-    ) {
-        ga::cuda::kernels::launch_setup_rng(
-            d_rng_states,
-            total_genes,
-            seed
-        );
-
-        ga::cuda::kernels::launch_initialize_population(
-            d_population,
-            d_rng_states,
-            total_genes,
-            min_value,
-            max_value
-        );
-    }
-
-    void evaluate() {
-        ga::cuda::kernels::launch_evaluate_fitness(
-            d_population,
-            d_fitness_values,
-            population_size,
-            chromosome_size,
-            fitness
-        );
-    }
-
-    void select() {
-        ga::cuda::kernels::launch_selection(
-            d_fitness_values,
-            d_parent_a_indices,
-            d_parent_b_indices,
-            d_rng_states,
-            population_size,
-            pair_count,
-            selection,
-            optimization
-        );
-    }
-
-    void reproduce() {
-        ga::cuda::kernels::launch_crossover_mutation(
-            d_population,
-            d_next_population,
-            d_parent_a_indices,
-            d_parent_b_indices,
-            d_rng_states,
-            population_size,
-            chromosome_size,
-            crossover,
-            mutation
-        );
-
-        std::swap(d_population, d_next_population);
-    }
-
-    void run(std::size_t generations) {
-        evaluate();
-        //print_best(0);
-
-        for (std::size_t generation = 1; generation <= generations; generation++) {
-            select();
-            reproduce();
-            evaluate();
-
-            //print_best(generation);
+        void select() {
+            ga::kernels::launch_selection(
+                d_fitness_values,
+                d_parent_a_indices,
+                d_parent_b_indices,
+                d_rng_states,
+                population_size,
+                pair_count,
+                selection,
+                optimization
+            );
         }
-    }
 
-    std::vector<double> copy_fitness_to_host() const {
-        std::vector<double> host_fitness(population_size);
+        void reproduce(std::size_t generation) {
+            ga::kernels::launch_crossover_mutation(
+                generation,
+                d_population,
+                d_next_population,
+                d_parent_a_indices,
+                d_parent_b_indices,
+                d_rng_states,
+                population_size,
+                chromosome_size,
+                crossover,
+                mutation
+            );
 
-        GA_CUDA_CHECK(cudaMemcpy(
-            host_fitness.data(),
-            d_fitness_values,
-            population_size * sizeof(double),
-            cudaMemcpyDeviceToHost
-        ));
+            std::swap(d_population, d_next_population);
+        }
 
-        return host_fitness;
-    }
+        template<typename Fitness>
+        void run(std::size_t generations, Fitness fitness) {
+            evaluate(fitness);
+            //print_best(0);
 
-    std::vector<GeneType> copy_population_to_host() const {
-        std::vector<GeneType> host_population(total_genes);
+            for (std::size_t generation = 1; generation <= generations; generation++) {
+                select();
+                reproduce(generation);
+                evaluate(fitness);
 
-        GA_CUDA_CHECK(cudaMemcpy(
-            host_population.data(),
-            d_population,
-            total_genes * sizeof(GeneType),
-            cudaMemcpyDeviceToHost
-        ));
+                //print_best(generation);
+            }
+        }
 
-        return host_population;
-    }
+        template<typename PopulationEvaluator>
+        void run_with(
+            std::size_t generations,
+            PopulationEvaluator& evaluator
+        ) {
+            evaluate_with(evaluator);
+            update_global_best(0);
+            print_best(0);
 
-    std::size_t best_index_host() const {
-        auto fitness_values = copy_fitness_to_host();
+            for (std::size_t generation = 1; generation <= generations; generation++) {
+                select();
+                reproduce(generation);
+                evaluate_with(evaluator);
+                update_global_best(generation);
+                print_best(generation);
 
-        std::size_t best_index = 0;
+            }
 
-        for (std::size_t i = 1; i < population_size; i++) {
-            if (optimization.is_better(
-                    fitness_values[i],
-                    fitness_values[best_index]
-                )
+            print_global_best();
+        }
+
+        void update_global_best(std::size_t generation) {
+            auto fitness_values = copy_fitness_to_host();
+
+            std::size_t best_index = 0;
+
+            for (std::size_t i = 1; i < population_size; i++) {
+                if (optimization.is_better(
+                        fitness_values[i],
+                        fitness_values[best_index]
+                    )
+                ) {
+                    best_index = i;
+                }
+            }
+
+            if (!has_global_best ||
+                optimization.is_better(fitness_values[best_index], global_best_fitness)
             ) {
-                best_index = i;
+                global_best_fitness = fitness_values[best_index];
+                global_best_generation = generation;
+                has_global_best = true;
+
+                global_best_chromosome.resize(chromosome_size);
+
+                GA_CUDA_CHECK(cudaMemcpy(
+                    global_best_chromosome.data(),
+                    d_population + best_index * chromosome_size,
+                    chromosome_size * sizeof(GeneType),
+                    cudaMemcpyDeviceToHost
+                ));
             }
         }
 
-        return best_index;
-    }
+        void print_global_best() const {
+            if (!has_global_best) {
+                std::cout << "No global best available.\n";
+                return;
+            }
 
-    double best_fitness_host() const {
-        auto fitness_values = copy_fitness_to_host();
-        return fitness_values[best_index_host()];
-    }
+            std::cout << "Global best"
+                    << " | generation = " << global_best_generation
+                    << " | fitness = " << global_best_fitness
+                    << "\n";
+            
+        }
 
-    void print_best(std::size_t generation) const {
-        auto fitness_values = copy_fitness_to_host();
-        auto population = copy_population_to_host();
+        std::vector<double> copy_fitness_to_host() const {
+            std::vector<double> host_fitness(population_size);
 
-        std::size_t best_index = 0;
+            GA_CUDA_CHECK(cudaMemcpy(
+                host_fitness.data(),
+                d_fitness_values,
+                population_size * sizeof(double),
+                cudaMemcpyDeviceToHost
+            ));
 
-        for (std::size_t i = 1; i < population_size; i++) {
-            if (optimization.is_better(
-                    fitness_values[i],
-                    fitness_values[best_index]
-                )
-            ) {
-                best_index = i;
+            return host_fitness;
+        }
+
+        std::vector<GeneType> copy_population_to_host() const {
+            std::vector<GeneType> host_population(total_genes);
+
+            GA_CUDA_CHECK(cudaMemcpy(
+                host_population.data(),
+                d_population,
+                total_genes * sizeof(GeneType),
+                cudaMemcpyDeviceToHost
+            ));
+
+            return host_population;
+        }
+
+        std::size_t best_index_host() const {
+            auto fitness_values = copy_fitness_to_host();
+
+            std::size_t best_index = 0;
+
+            for (std::size_t i = 1; i < population_size; i++) {
+                if (optimization.is_better(
+                        fitness_values[i],
+                        fitness_values[best_index]
+                    )
+                ) {
+                    best_index = i;
+                }
+            }
+
+            return best_index;
+        }
+
+        double best_fitness_host() const {
+            auto fitness_values = copy_fitness_to_host();
+            return fitness_values[best_index_host()];
+        }
+
+        void print_best(std::size_t generation) const {
+            auto fitness_values = copy_fitness_to_host();
+
+            std::size_t best_index = 0;
+
+            for (std::size_t i = 1; i < population_size; i++) {
+                if (optimization.is_better(
+                        fitness_values[i],
+                        fitness_values[best_index]
+                    )
+                ) {
+                    best_index = i;
+                }
+            }
+
+            std::cout << "Generation " << generation
+                    << " | best fitness = "
+                    << fitness_values[best_index]
+                    << "\n";
+
+        
+        }
+
+        const std::vector<GeneType>& best_chromosome() const {
+            if (!has_global_best) {
+                throw std::runtime_error("No global best available.");
+            }
+
+            return global_best_chromosome;
+        }
+
+        double best_fitness() const {
+            if (!has_global_best) {
+                throw std::runtime_error("No global best available.");
+            }
+
+            return global_best_fitness;
+        }
+
+        std::size_t best_generation() const {
+            if (!has_global_best) {
+                throw std::runtime_error("No global best available.");
+            }
+
+            return global_best_generation;
+        }
+
+    private:
+        void allocate() {
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_population,
+                total_genes * sizeof(GeneType)
+            ));
+
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_next_population,
+                total_genes * sizeof(GeneType)
+            ));
+
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_fitness_values,
+                population_size * sizeof(double)
+            ));
+
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_parent_a_indices,
+                pair_count * sizeof(int)
+            ));
+
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_parent_b_indices,
+                pair_count * sizeof(int)
+            ));
+
+            GA_CUDA_CHECK(cudaMalloc(
+                &d_rng_states,
+                total_genes * sizeof(curandState)
+            ));
+        }
+
+        void release() {
+            if (d_population) {
+                cudaFree(d_population);
+            }
+
+            if (d_next_population) {
+                cudaFree(d_next_population);
+            }
+
+            if (d_fitness_values) {
+                cudaFree(d_fitness_values);
+            }
+
+            if (d_parent_a_indices) {
+                cudaFree(d_parent_a_indices);
+            }
+
+            if (d_parent_b_indices) {
+                cudaFree(d_parent_b_indices);
+            }
+
+            if (d_rng_states) {
+                cudaFree(d_rng_states);
             }
         }
 
-        std::cout << "Generation " << generation
-                  << " | best fitness = "
-                  << fitness_values[best_index]
-                  << " | individual = [";
+        std::size_t population_size;
+        std::size_t chromosome_size;
+        std::size_t total_genes;
+        std::size_t pair_count;
 
-        std::size_t offset = best_index * chromosome_size;
+        Mutation mutation;
+        Crossover crossover;
+        Selection selection;
+        Optimization optimization;
 
-        for (std::size_t locus = 0; locus < chromosome_size; locus++) {
-            std::cout << std::fixed
-                      << std::setprecision(6)
-                      << std::setw(10)
-                      << population[offset + locus];
+        GeneType* d_population = nullptr;
+        GeneType* d_next_population = nullptr;
 
-            if (locus + 1 < chromosome_size) {
-                std::cout << ",";
-            }
-        }
+        double* d_fitness_values = nullptr;
 
-        std::cout << "]\n";
-    }
+        int* d_parent_a_indices = nullptr;
+        int* d_parent_b_indices = nullptr;
 
-private:
-    void allocate() {
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_population,
-            total_genes * sizeof(GeneType)
-        ));
+        curandState* d_rng_states = nullptr;
 
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_next_population,
-            total_genes * sizeof(GeneType)
-        ));
-
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_fitness_values,
-            population_size * sizeof(double)
-        ));
-
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_parent_a_indices,
-            pair_count * sizeof(int)
-        ));
-
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_parent_b_indices,
-            pair_count * sizeof(int)
-        ));
-
-        GA_CUDA_CHECK(cudaMalloc(
-            &d_rng_states,
-            total_genes * sizeof(curandState)
-        ));
-    }
-
-    void release() {
-        if (d_population) {
-            cudaFree(d_population);
-        }
-
-        if (d_next_population) {
-            cudaFree(d_next_population);
-        }
-
-        if (d_fitness_values) {
-            cudaFree(d_fitness_values);
-        }
-
-        if (d_parent_a_indices) {
-            cudaFree(d_parent_a_indices);
-        }
-
-        if (d_parent_b_indices) {
-            cudaFree(d_parent_b_indices);
-        }
-
-        if (d_rng_states) {
-            cudaFree(d_rng_states);
-        }
-    }
-
-private:
-    std::size_t population_size;
-    std::size_t chromosome_size;
-    std::size_t total_genes;
-    std::size_t pair_count;
-
-    Mutation mutation;
-    Crossover crossover;
-    Selection selection;
-    Fitness fitness;
-    Optimization optimization;
-
-    GeneType* d_population = nullptr;
-    GeneType* d_next_population = nullptr;
-
-    double* d_fitness_values = nullptr;
-
-    int* d_parent_a_indices = nullptr;
-    int* d_parent_b_indices = nullptr;
-
-    curandState* d_rng_states = nullptr;
-};
+        std::vector<GeneType> global_best_chromosome;
+        double global_best_fitness = 0.0;
+        bool has_global_best = false;
+        std::size_t global_best_generation = 0;
+    };
 
 }

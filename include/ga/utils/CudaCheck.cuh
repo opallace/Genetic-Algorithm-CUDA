@@ -14,3 +14,13 @@
             );                                                             \
         }                                                                  \
     } while (0)
+    
+#define CUSPARSE_CHECK(call)                                               \
+    do {                                                                   \
+        cusparseStatus_t status = call;                                    \
+        if (status != CUSPARSE_STATUS_SUCCESS) {                           \
+            fprintf(stderr, "cuSPARSE error at %s:%d: %d\n",               \
+                    __FILE__, __LINE__, static_cast<int>(status));         \
+            exit(EXIT_FAILURE);                                            \
+        }                                                                  \
+    } while (0)

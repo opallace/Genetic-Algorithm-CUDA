@@ -3,7 +3,7 @@
 #include <concepts>
 #include <curand_kernel.h>
 
-namespace ga::cuda::concepts {
+namespace ga::concepts {
 
     template<typename Crossover, typename GeneType>
     concept CudaCrossoverConcept =

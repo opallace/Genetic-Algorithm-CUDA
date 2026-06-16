@@ -3,7 +3,7 @@
 #include <concepts>
 #include <cstddef>
 
-namespace ga::cuda::concepts {
+namespace ga::concepts {
 
     template<typename Selection>
     concept CudaSelectionConcept =
