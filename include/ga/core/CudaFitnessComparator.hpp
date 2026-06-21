@@ -2,7 +2,7 @@
 
 namespace ga::core {
 
-    class CudaMaximize {
+    class CudaMaximizeFitness {
         public:
             __host__ __device__
             bool is_better(double candidate, double current_best) const {
@@ -10,7 +10,7 @@ namespace ga::core {
             }
     };
 
-    class CudaMinimize {
+    class CudaMinimizeFitness {
         public:
             __host__ __device__
             bool is_better(double candidate, double current_best) const {

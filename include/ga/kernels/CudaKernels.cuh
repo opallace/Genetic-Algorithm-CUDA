@@ -7,6 +7,7 @@
 
 #include "ga/core/CudaChromosome.hpp"
 #include "ga/utils/CudaCheck.cuh"
+#include "ga/utils/CudaRandom.cuh"
 
 namespace ga::kernels {
 
@@ -15,6 +16,7 @@ namespace ga::kernels {
         curandState* rng_states,
         std::size_t total_states,
         unsigned long seed
+
     ) {
         std::size_t id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -29,6 +31,7 @@ namespace ga::kernels {
         curandState* rng_states,
         std::size_t total_states,
         unsigned long seed
+
     ) {
         constexpr int threads = 1024;
 
@@ -46,14 +49,13 @@ namespace ga::kernels {
         GA_CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    template<typename GeneType>
     __global__
-    void initialize_population_kernel(
-        GeneType* population,
+    void create_uniform_population_kernel(
+        float* population,
         curandState* rng_states,
         std::size_t total_genes,
-        GeneType min_value,
-        GeneType max_value
+        float min_value,
+        float max_value
     ) {
         std::size_t gene_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -65,21 +67,52 @@ namespace ga::kernels {
 
         float u = curand_uniform(&rng_state);
 
-        population[gene_id] = static_cast<GeneType>(
-            static_cast<float>(min_value)
-            + (static_cast<float>(max_value) - static_cast<float>(min_value)) * u
-        );
+        population[gene_id] = min_value + (max_value - min_value) * u;
 
         rng_states[gene_id] = rng_state;
     }
 
-    template<typename GeneType>
-    void launch_initialize_population(
-        GeneType* population,
+    __global__
+    void create_truncated_gaussian_population_kernel(
+        float* population,
         curandState* rng_states,
         std::size_t total_genes,
-        GeneType min_value,
-        GeneType max_value
+        float min_value,
+        float max_value,
+        float sigma
+    ) {
+        std::size_t gene_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (gene_id >= total_genes) {
+            return;
+        }
+
+         curandState rng_state = rng_states[gene_id];
+
+        float mean = 0.5f * (min_value + max_value);
+        float alpha = (min_value - mean) / sigma;
+        float beta  = (max_value - mean) / sigma;
+
+        float phi_alpha = ga::utils::standard_normal_cdf(alpha);
+        float phi_beta  = ga::utils::standard_normal_cdf(beta);
+
+        float u = curand_uniform(&rng_state);
+        float p = phi_alpha + (phi_beta - phi_alpha) * u;
+        float z = ga::utils::standard_normal_inverse_cdf(p);
+
+        float value = mean + sigma * z;
+
+        population[gene_id] = value;
+
+        rng_states[gene_id] = rng_state;
+    }
+
+    void launch_create_uniform_population(
+        float* population,
+        curandState* rng_states,
+        std::size_t total_genes,
+        float min_value,
+        float max_value
     ) {
         constexpr int threads = 1024;
 
@@ -87,12 +120,39 @@ namespace ga::kernels {
             (total_genes + threads - 1) / threads
         );
 
-        initialize_population_kernel<<<blocks, threads>>>(
+        create_uniform_population_kernel<<<blocks, threads>>>(
             population,
             rng_states,
             total_genes,
             min_value,
             max_value
+        );
+
+        GA_CUDA_CHECK(cudaGetLastError());
+        GA_CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    void launch_create_truncated_gaussian_population(
+        float* population,
+        curandState* rng_states,
+        std::size_t total_genes,
+        float min_value,
+        float max_value,
+        float sigma
+    ) {
+        constexpr int threads = 1024;
+
+        int blocks = static_cast<int>(
+            (total_genes + threads - 1) / threads
+        );
+
+        create_truncated_gaussian_population_kernel<<<blocks, threads>>>(
+            population,
+            rng_states,
+            total_genes,
+            min_value,
+            max_value,
+            sigma
         );
 
         GA_CUDA_CHECK(cudaGetLastError());
@@ -227,11 +287,11 @@ namespace ga::kernels {
         int* parent_b_indices,
         curandState* rng_states,
         std::size_t population_size,
-        std::size_t pair_count,
         Selection selection,
         Optimization optimization
     ) {
         constexpr int threads = 1024;
+        std::size_t pair_count = population_size / 2;
 
         int blocks = static_cast<int>(
             (pair_count + threads - 1) / threads
