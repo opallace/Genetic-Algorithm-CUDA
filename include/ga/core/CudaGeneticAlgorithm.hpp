@@ -5,6 +5,8 @@
 #include <iostream>
 #include <iomanip>
 #include <stdexcept>
+#include <algorithm>
+#include <numeric>
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -47,7 +49,7 @@ namespace ga::core {
     requires
         ga::concepts::CudaMutationConcept<Mutation, GeneType>                   &&
         ga::concepts::CudaCrossoverConcept<Crossover, GeneType>                 &&
-        ga::concepts::CudaSelectionConcept<Selection>                           && 
+        ga::concepts::CudaSelectionConcept<Selection, FitnessComparator>        && 
         ga::concepts::CudaFitnessComparatorConcept<FitnessComparator, GeneType>
 
     class CudaGeneticAlgorithm 
@@ -62,6 +64,7 @@ namespace ga::core {
              *
              * @param population_size_ Number of individuals in the population.
              * @param chromosome_size_ Number of genes in each chromosome.
+             * @param elitism_count_ Number of genes in each chromosome.
              * @param mutation_ Mutation operator used during reproduction.
              * @param crossover_ Crossover operator used during reproduction.
              * @param selection_ Selection policy used to choose parent pairs.
@@ -73,6 +76,7 @@ namespace ga::core {
             CudaGeneticAlgorithm(
                 std::size_t population_size_,
                 std::size_t chromosome_size_,
+                std::size_t elitism_count_,
                 Mutation mutation_,
                 Crossover crossover_,
                 Selection selection_,
@@ -82,6 +86,7 @@ namespace ga::core {
                 : population_size(population_size_),
                   chromosome_size(chromosome_size_),
                   total_genes(population_size_ * chromosome_size_),
+                  elitism_count(elitism_count_),
                   mutation(mutation_),
                   crossover(crossover_),
                   selection(selection_),
@@ -264,7 +269,12 @@ namespace ga::core {
              *
              * @param generation Current generation index.
              */
-            void reproduce(std::size_t generation) {
+            void reproduce(std::size_t generation)
+            {
+                auto elite_indices = find_elite_indices_host();
+
+                const std::size_t offspring_count = population_size - elitism_count;
+
                 ga::kernels::launch_crossover_mutation(
                     generation,
                     d_population,
@@ -272,11 +282,13 @@ namespace ga::core {
                     d_parent_a_indices,
                     d_parent_b_indices,
                     d_rng_states,
-                    population_size,
                     chromosome_size,
+                    offspring_count,
                     crossover,
                     mutation
                 );
+
+                copy_elites_to_next_population(elite_indices);
 
                 std::swap(d_population, d_next_population);
             }
@@ -300,18 +312,18 @@ namespace ga::core {
             void run(std::size_t generations, Fitness fitness) {
                 evaluate(fitness);
                 update_global_best(0);
-                print_best(0);
+                print_best_fitness(0);
 
                 for (std::size_t generation = 1; generation <= generations; generation++) {
                     select();
                     reproduce(generation);
                     evaluate(fitness);
                     update_global_best(generation);
-                    print_best(generation);
+                    print_best_fitness(generation);
 
                 }
 
-                print_global_best();
+                print_global_best_fitness();
             }
 
             /**
@@ -331,18 +343,18 @@ namespace ga::core {
             ) {
                 evaluate_with(evaluator);
                 update_global_best(0);
-                print_best(0);
+                print_best_fitness(0);
 
                 for (std::size_t generation = 1; generation <= generations; generation++) {
                     select();
                     reproduce(generation);
                     evaluate_with(evaluator);
                     update_global_best(generation);
-                    print_best(generation);
+                    print_best_fitness(generation);
 
                 }
 
-                print_global_best();
+                print_global_best_fitness();
             }
 
             // -------------------------------------------------------------------------
@@ -394,7 +406,7 @@ namespace ga::core {
             /**
              * Prints the best solution found across all evaluated generations.
              */
-            void print_global_best() const {
+            void print_global_best_fitness() const {
                 if (!has_global_best) {
                     std::cout << "No global best available.\n";
                     return;
@@ -412,7 +424,7 @@ namespace ga::core {
              *
              * @param generation Generation index shown in the printed message.
              */
-            void print_best(std::size_t generation) const {
+            void print_best_fitness(std::size_t generation) const {
                 auto fitness_values = copy_fitness_to_host();
 
                 std::size_t best_index = 0;
@@ -480,10 +492,35 @@ namespace ga::core {
                 return global_best_generation;
             }
 
+            void print_population() const
+            {
+                auto h_population = copy_population_to_host();
+
+                for (std::size_t individual = 0; individual < population_size; individual++)
+                {
+                    std::cout << "[";
+
+                    for (std::size_t allele = 0; allele < chromosome_size; allele++)
+                    {
+                        std::size_t index = individual * chromosome_size + allele;
+
+                        std::cout << h_population[index];
+
+                        if (allele < chromosome_size - 1)
+                        {
+                            std::cout << ", ";
+                        }
+                    }
+
+                    std::cout << "]" << std::endl;
+                }
+            }
+
         private:
             std::size_t population_size;
             std::size_t chromosome_size;
             std::size_t total_genes;
+            std::size_t elitism_count;
 
             Mutation mutation;
             Crossover crossover;
@@ -507,6 +544,12 @@ namespace ga::core {
 
             void validate()
             {
+                if (elitism_count >= population_size) {
+                    throw std::invalid_argument(
+                        "Elitism count must be smaller than population size."
+                    );
+                }
+
                 if (population_size < 2) {
                     throw std::invalid_argument(
                         "Population size must be at least 2."
@@ -586,6 +629,65 @@ namespace ga::core {
                 }
             }
 
+            std::vector<std::size_t> find_elite_indices_host() const
+            {
+                std::vector<std::size_t> elite_indices;
+
+                if (elitism_count == 0) {
+                    return elite_indices;
+                }
+
+                auto fitness_values = copy_fitness_to_host();
+
+                std::vector<std::size_t> indices(population_size);
+
+                std::iota(
+                    indices.begin(),
+                    indices.end(),
+                    static_cast<std::size_t>(0)
+                );
+
+                std::partial_sort(
+                    indices.begin(),
+                    indices.begin() + elitism_count,
+                    indices.end(),
+                    [this, &fitness_values](std::size_t a, std::size_t b) {
+                        return fitness_comparator.is_better(
+                            fitness_values[a],
+                            fitness_values[b]
+                        );
+                    }
+                );
+
+                elite_indices.assign(
+                    indices.begin(),
+                    indices.begin() + elitism_count
+                );
+
+                return elite_indices;
+            }
+
+            void copy_elites_to_next_population(
+                const std::vector<std::size_t>& elite_indices
+            )
+            {
+                for (std::size_t elite_position = 0; elite_position < elite_indices.size(); elite_position++)
+                {
+                    std::size_t source_index = elite_indices[elite_position];
+
+                    const GeneType* source = d_population + source_index * chromosome_size;
+
+                    GeneType* destination = d_next_population + (elite_position + (population_size - elitism_count)) * chromosome_size;
+
+                    GA_CUDA_CHECK(cudaMemcpy(
+                        destination,
+                        source,
+                        chromosome_size * sizeof(GeneType),
+                        cudaMemcpyDeviceToDevice
+                    ));
+                }
+            }
+
             std::vector<double> copy_fitness_to_host() const {
                 std::vector<double> host_fitness(population_size);
 
@@ -597,6 +699,19 @@ namespace ga::core {
                 ));
 
                 return host_fitness;
+            }
+
+            std::vector<GeneType> copy_population_to_host() const {
+                std::vector<GeneType> h_population(total_genes);
+
+                GA_CUDA_CHECK(cudaMemcpy(
+                    h_population.data(),
+                    d_population,
+                    total_genes * sizeof(GeneType),
+                    cudaMemcpyDeviceToHost
+                ));
+
+                return h_population;
             }
     };
 

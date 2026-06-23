@@ -280,7 +280,7 @@ namespace ga::kernels {
         rng_states[pair_id] = rng_state;
     }
 
-    template<typename Selection, typename Optimization>
+    template<typename Selection, typename FitnessComparator>
     void launch_selection(
         const double* fitness_values,
         int* parent_a_indices,
@@ -288,9 +288,10 @@ namespace ga::kernels {
         curandState* rng_states,
         std::size_t population_size,
         Selection selection,
-        Optimization optimization
+        FitnessComparator fitness_comparator
     ) {
         constexpr int threads = 1024;
+
         std::size_t pair_count = population_size / 2;
 
         int blocks = static_cast<int>(
@@ -305,7 +306,7 @@ namespace ga::kernels {
             population_size,
             pair_count,
             selection,
-            optimization
+            fitness_comparator
         );
 
         GA_CUDA_CHECK(cudaGetLastError());
@@ -325,21 +326,21 @@ namespace ga::kernels {
         const int* parent_a_indices,
         const int* parent_b_indices,
         curandState* rng_states,
-        std::size_t population_size,
         std::size_t chromosome_size,
+        std::size_t offspring_count,
         Crossover crossover,
         Mutation mutation
     ) {
-        std::size_t gene_id = blockIdx.x * blockDim.x + threadIdx.x;
-        std::size_t total_genes = population_size * chromosome_size;
+        std::size_t gene_id               = blockIdx.x * blockDim.x + threadIdx.x;
+        std::size_t total_offspring_genes = offspring_count * chromosome_size;
 
-        if (gene_id >= total_genes) {
+        if (gene_id >= total_offspring_genes) {
             return;
         }
 
         std::size_t child_id = gene_id / chromosome_size;
-        std::size_t locus = gene_id % chromosome_size;
-        std::size_t pair_id = child_id / 2;
+        std::size_t locus    = gene_id % chromosome_size;
+        std::size_t pair_id  = child_id / 2;
 
         int parent_a = parent_a_indices[pair_id];
         int parent_b = parent_b_indices[pair_id];
@@ -350,7 +351,7 @@ namespace ga::kernels {
         curandState rng_state = rng_states[gene_id];
 
         GeneType child_allele = crossover(allele_a, allele_b, rng_state);
-                 child_allele = mutation(generation, child_allele, rng_state);
+                 child_allele = mutation(child_allele, rng_state);
 
         next_population[gene_id] = child_allele;
 
@@ -369,17 +370,17 @@ namespace ga::kernels {
         const int* parent_a_indices,
         const int* parent_b_indices,
         curandState* rng_states,
-        std::size_t population_size,
         std::size_t chromosome_size,
+        std::size_t offspring_count,
         Crossover crossover,
         Mutation mutation
     ) {
-        std::size_t total_genes = population_size * chromosome_size;
+        std::size_t total_offspring_genes = offspring_count * chromosome_size;
 
         constexpr int threads = 1024;
 
         int blocks = static_cast<int>(
-            (total_genes + threads - 1) / threads
+            (total_offspring_genes + threads - 1) / threads
         );
 
         crossover_mutation_kernel<<<blocks, threads>>>(
@@ -389,8 +390,8 @@ namespace ga::kernels {
             parent_a_indices,
             parent_b_indices,
             rng_states,
-            population_size,
             chromosome_size,
+            offspring_count,
             crossover,
             mutation
         );

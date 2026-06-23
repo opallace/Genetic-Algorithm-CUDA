@@ -1,45 +1,111 @@
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 cmake_minimum_required(VERSION 3.22)
 
 project(GeneticAlgorithmCUDA LANGUAGES CUDA CXX)
 
 find_package(CUDAToolkit REQUIRED)
 
-add_executable(main
-    src/main.cu
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-    src/ctqw/fitness/CtqwFitnessEvaluator.cu
+# Para GTX 1060, se quiser fixar:
+set(CMAKE_CUDA_ARCHITECTURES 61)
 
-    src/ctqw/sparse/DeviceCsrMatrix.cu
-    src/ctqw/sparse/LaplacianBuilder.cpp
-    src/ctqw/sparse/LaplacianStructure.cpp
-    src/ctqw/sparse/LaplacianWeightUpdater.cu
+# ============================================================
+# Biblioteca genérica do GA
+# ============================================================
 
-    src/ctqw/solver/CtqwKernels.cu
-    src/ctqw/solver/CtqwRk4Solver.cu
+add_library(ga_cuda INTERFACE)
 
-    src/ctqw/problem/TransferEvaluator.cu
-    src/ctqw/problem/ReusableTransferEvaluator.cu
-)
-
-target_include_directories(main
-    PRIVATE
+target_include_directories(ga_cuda
+    INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(main
-    PRIVATE
+target_link_libraries(ga_cuda
+    INTERFACE
         CUDA::cudart
         CUDA::curand
-        CUDA::cusparse
 )
 
-target_compile_options(main
+# ============================================================
+# Função para problemas simples que só usam o GA
+# ============================================================
+
+function(add_ga_problem target_name main_file)
+    add_executable(${target_name}
+        ${main_file}
+    )
+
+    target_include_directories(${target_name}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(${target_name}
+        PRIVATE
+            ga_cuda
+    )
+
+    target_compile_options(${target_name}
+        PRIVATE
+            --std=c++20
+    )
+
+    set_target_properties(${target_name} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+endfunction()
+
+# ============================================================
+# Problema Target 5
+# ============================================================
+
+add_ga_problem(target_5
+    problems/target_5/main.cu
+)
+
+# ============================================================
+# Problema Sphere
+# ============================================================
+
+add_ga_problem(sphere
+    problems/sphere/main.cu
+)
+
+# ============================================================
+# Problema CTQW
+# ============================================================
+
+add_executable(ctqw
+    problems/ctqw/main.cu
+
+    problems/ctqw/src/fitness/CtqwFitnessEvaluator.cu
+
+    problems/ctqw/src/problem/StateTransferEvaluator.cu
+
+    problems/ctqw/src/solver/CtqwKernels.cu
+    problems/ctqw/src/solver/CtqwRk4Solver.cu
+
+    problems/ctqw/src/sparse/DeviceWeightedLaplacian.cu
+)
+
+target_include_directories(ctqw
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/problems/ctqw/include
+)
+
+target_link_libraries(ctqw
+    PRIVATE
+        ga_cuda
+        CUDA::cudart
+        CUDA::curand
+)
+
+target_compile_options(ctqw
     PRIVATE
         --std=c++20
 )
 
-set_target_properties(main PROPERTIES
+set_target_properties(ctqw PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
