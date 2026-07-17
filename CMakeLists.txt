@@ -80,10 +80,7 @@ add_executable(ctqw
 
     problems/ctqw/src/fitness/CtqwFitnessEvaluator.cu
 
-    problems/ctqw/src/problem/StateTransferEvaluator.cu
-
-    problems/ctqw/src/solver/CtqwKernels.cu
-    problems/ctqw/src/solver/CtqwRk4Solver.cu
+    problems/ctqw/src/solver/CtqwBatchKernels.cu
 
     problems/ctqw/src/sparse/DeviceWeightedLaplacian.cu
 )
@@ -97,8 +94,6 @@ target_include_directories(ctqw
 target_link_libraries(ctqw
     PRIVATE
         ga_cuda
-        CUDA::cudart
-        CUDA::curand
 )
 
 target_compile_options(ctqw
@@ -107,5 +102,36 @@ target_compile_options(ctqw
 )
 
 set_target_properties(ctqw PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+# ============================================================
+# Problema Suspended Load
+# ============================================================
+
+add_executable(suspended_load
+    problems/suspended_load/main.cu
+
+    problems/suspended_load/src/solver/SuspendedLoadRk4Solver.cu
+
+)
+
+target_include_directories(suspended_load
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/problems/suspended_load/include
+)
+
+target_link_libraries(suspended_load
+    PRIVATE
+        ga_cuda
+)
+
+target_compile_options(suspended_load
+    PRIVATE
+        --std=c++20
+)
+
+set_target_properties(suspended_load PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )

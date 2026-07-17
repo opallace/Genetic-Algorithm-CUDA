@@ -52,26 +52,6 @@ namespace ctqw::graph {
                 edges.clear();
             }
 
-            void add_edge(int u, int v, float w = 1.0f) {
-                validate_edge(u, v, w);
-
-                if (u > v) {
-                    std::swap(u, v);
-                }
-
-                if (has_edge(u, v)) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: duplicate edges are not allowed."
-                    );
-                }
-
-                edges.push_back(Edge{
-                    u,
-                    v,
-                    w
-                });
-            }
-
             void generate_erdos_renyi(
                 int vertex_count,
                 float edge_probability,
@@ -102,7 +82,11 @@ namespace ctqw::graph {
                         const float draw = distribution(rng);
 
                         if (draw <= edge_probability) {
-                            add_edge(u, v, initial_weight);
+                            edges.push_back(Edge{
+                                u,
+                                v,
+                                initial_weight
+                            });
                         }
                     }
                 }
@@ -172,52 +156,6 @@ namespace ctqw::graph {
                         "Graph: vertex_count must be positive."
                     );
                 }
-            }
-
-            void validate_edge(int u, int v, float w) const {
-                if (vertex_count_ <= 0) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: graph has no vertices."
-                    );
-                }
-
-                if (u < 0 || u >= vertex_count_) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: vertex u is out of range."
-                    );
-                }
-
-                if (v < 0 || v >= vertex_count_) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: vertex v is out of range."
-                    );
-                }
-
-                if (u == v) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: self-loops are not allowed."
-                    );
-                }
-
-                if (w < 0.0f) {
-                    throw std::invalid_argument(
-                        "Graph::add_edge: edge weight must be non-negative."
-                    );
-                }
-            }
-
-            bool has_edge(int u, int v) const {
-                if (u > v) {
-                    std::swap(u, v);
-                }
-
-                for (const auto& edge : edges) {
-                    if (edge.u == u && edge.v == v) {
-                        return true;
-                    }
-                }
-
-                return false;
             }
     };
 

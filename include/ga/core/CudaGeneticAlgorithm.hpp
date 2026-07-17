@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <vector>
 #include <iostream>
-#include <iomanip>
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
@@ -12,13 +11,27 @@
 #include <curand_kernel.h>
 
 #include "ga/utils/CudaCheck.cuh"
-#include "ga/kernels/CudaKernels.cuh"
+#include "ga/utils/GATelemetry.hpp"
+
 #include "ga/concepts/CudaMutationConcept.hpp"
 #include "ga/concepts/CudaCrossoverConcept.hpp"
 #include "ga/concepts/CudaSelectionConcept.hpp"
 #include "ga/concepts/CudaFitnessComparatorConcept.hpp"
+#include "ga/concepts/CudaPopulationInitializerConcept.hpp"
+
+#include "ga/kernels/CudaEvaluationKernels.cuh"
+#include "ga/kernels/CudaRandomKernels.cuh"
+#include "ga/kernels/CudaReproductionKernels.cuh"
+#include "ga/kernels/CudaSelectionKernels.cuh"
 
 namespace ga::core {
+
+    struct GenerationStats{
+        std::size_t best_index = 0;
+        double best_fitness    = 0.0;
+        std::vector<std::size_t> elite_indices;
+
+    };
 
     /**
      * CUDA-based genetic algorithm.
@@ -41,6 +54,7 @@ namespace ga::core {
      */
     template<
         typename GeneType,
+        typename Population,
         typename Mutation,
         typename Crossover,
         typename Selection,
@@ -50,49 +64,31 @@ namespace ga::core {
         ga::concepts::CudaMutationConcept<Mutation, GeneType>                   &&
         ga::concepts::CudaCrossoverConcept<Crossover, GeneType>                 &&
         ga::concepts::CudaSelectionConcept<Selection, FitnessComparator>        && 
-        ga::concepts::CudaFitnessComparatorConcept<FitnessComparator, GeneType>
+        ga::concepts::CudaFitnessComparatorConcept<FitnessComparator, double>
 
     class CudaGeneticAlgorithm 
     {
         public:
-            // -------------------------------------------------------------------------
-            // Construction and lifetime
-            // -------------------------------------------------------------------------
-
-            /**
-             * Creates a CUDA genetic algorithm instance and allocates all device buffers.
-             *
-             * @param population_size_ Number of individuals in the population.
-             * @param chromosome_size_ Number of genes in each chromosome.
-             * @param elitism_count_ Number of genes in each chromosome.
-             * @param mutation_ Mutation operator used during reproduction.
-             * @param crossover_ Crossover operator used during reproduction.
-             * @param selection_ Selection policy used to choose parent pairs.
-             * @param fitness_comparator_ Comparator used to rank fitness values.
-             *
-             * @throws std::invalid_argument If the population size is smaller than 2,
-             * if the population size is odd, or if the chromosome size is zero.
-             */
+            
             CudaGeneticAlgorithm(
-                std::size_t population_size_,
-                std::size_t chromosome_size_,
                 std::size_t elitism_count_,
+                float crossover_rate_,
+
+                Population& population_,
                 Mutation mutation_,
                 Crossover crossover_,
                 Selection selection_,
                 FitnessComparator fitness_comparator_
-
             )
-                : population_size(population_size_),
-                  chromosome_size(chromosome_size_),
-                  total_genes(population_size_ * chromosome_size_),
-                  elitism_count(elitism_count_),
+                : elitism_count(elitism_count_),
+                  crossover_rate(crossover_rate_), 
+
+                  population(population_),
                   mutation(mutation_),
                   crossover(crossover_),
                   selection(selection_),
                   fitness_comparator(fitness_comparator_)
             {
-
                 validate();
                 allocate();
             }
@@ -118,75 +114,22 @@ namespace ga::core {
             // Population initialization
             // -------------------------------------------------------------------------
 
-            /**
-             * Initializes the population using a uniform distribution.
-             *
-             * Each gene is sampled independently from the interval
-             * [min_value, max_value]. The CUDA random states are reset using the
-             * provided seed before the population is generated.
-             *
-             * @param min_value Lower bound for each generated gene.
-             * @param max_value Upper bound for each generated gene.
-             * @param seed Seed used to initialize CUDA random states.
-             */
-            void create_uniform_population(
-                float min_value,
-                float max_value,
+            template<typename PopulationInitializer>
+            requires ga::concepts::CudaPopulationInitializerConcept<
+                PopulationInitializer,
+                GeneType
+            >
+            void create_population(
+                PopulationInitializer initializer,
                 unsigned long seed = 1234
+            )
+            {
+                population.initialize(initializer, seed);
 
-            ) {
                 ga::kernels::launch_setup_rng(
-                    d_rng_states,
-                    total_genes,
-                    seed
-                );
-
-                ga::kernels::launch_create_uniform_population(
-                    d_population,
-                    d_rng_states,
-                    total_genes,
-                    min_value,
-                    max_value
-                );
-            }
-
-            /**
-             * Initializes the population using a truncated Gaussian distribution.
-             *
-             * The underlying Gaussian distribution is centered at the middle of
-             * the interval:
-             *
-             *     mean = (min_value + max_value) / 2
-             *
-             * The generated genes are constrained to [min_value, max_value].
-             * The CUDA random states are reset using the provided seed before
-             * the population is generated.
-             *
-             * @param min_value Lower bound for each generated gene.
-             * @param max_value Upper bound for each generated gene.
-             * @param sigma Standard deviation of the underlying Gaussian distribution.
-             * @param seed Seed used to initialize CUDA random states.
-             */
-            void create_truncated_gaussian_population(
-                float min_value,
-                float max_value,
-                float sigma,
-                unsigned long seed = 1234
-
-            ) {
-                ga::kernels::launch_setup_rng(
-                    d_rng_states,
-                    total_genes,
-                    seed
-                );
-
-                ga::kernels::launch_create_truncated_gaussian_population(
-                    d_population,
-                    d_rng_states,
-                    total_genes,
-                    min_value,
-                    max_value,
-                    sigma
+                    d_pair_rng_states,
+                    population.capacity() / 2,
+                    seed + 1337
                 );
             }
 
@@ -206,10 +149,10 @@ namespace ga::core {
             template<typename Fitness>
             void evaluate(Fitness fitness) {
                 ga::kernels::launch_evaluate_fitness(
-                    d_population,
+                    population.data(),
                     d_fitness_values,
-                    population_size,
-                    chromosome_size,
+                    population.size(),
+                    population.chromosome_length(),
                     fitness
                 );
             }
@@ -227,10 +170,10 @@ namespace ga::core {
             template<typename PopulationEvaluator>
             void evaluate_with(PopulationEvaluator& evaluator) {
                 evaluator.evaluate_population(
-                    d_population,
+                    population.data(),
                     d_fitness_values,
-                    population_size,
-                    chromosome_size
+                    population.size(),
+                    population.chromosome_length()
                 );
             }
 
@@ -249,8 +192,10 @@ namespace ga::core {
                     d_fitness_values,
                     d_parent_a_indices,
                     d_parent_b_indices,
-                    d_rng_states,
-                    population_size,
+                    d_pair_crosses,
+                    d_pair_rng_states,
+                    population.size(),
+                    crossover_rate,
                     selection,
                     fitness_comparator
                 );
@@ -269,20 +214,27 @@ namespace ga::core {
              *
              * @param generation Current generation index.
              */
-            void reproduce(std::size_t generation)
+            void reproduce(
+                const std::vector<std::size_t>& elite_indices
+            )
             {
-                auto elite_indices = find_elite_indices_host();
+                if (elite_indices.size() != elitism_count)
+                {
+                    throw std::runtime_error(
+                        "Elite index count does not match elitism_count."
+                    );
+                }
 
-                const std::size_t offspring_count = population_size - elitism_count;
+                const std::size_t offspring_count = population.size() - elitism_count;
 
                 ga::kernels::launch_crossover_mutation(
-                    generation,
-                    d_population,
-                    d_next_population,
+                    population.data(),
+                    population.next_data(),
                     d_parent_a_indices,
                     d_parent_b_indices,
-                    d_rng_states,
-                    chromosome_size,
+                    d_pair_crosses,
+                    population.gene_rng_states(),
+                    population.chromosome_length(),
                     offspring_count,
                     crossover,
                     mutation
@@ -290,7 +242,7 @@ namespace ga::core {
 
                 copy_elites_to_next_population(elite_indices);
 
-                std::swap(d_population, d_next_population);
+                population.swap_buffers();
             }
 
             // -------------------------------------------------------------------------
@@ -311,15 +263,17 @@ namespace ga::core {
             template<typename Fitness>
             void run(std::size_t generations, Fitness fitness) {
                 evaluate(fitness);
-                update_global_best(0);
-                print_best_fitness(0);
+                GenerationStats stats = compute_generation_stats();
+                update_global_best(0, stats);
+                print_best_fitness(0, stats);
 
                 for (std::size_t generation = 1; generation <= generations; generation++) {
                     select();
-                    reproduce(generation);
+                    reproduce(stats.elite_indices);
                     evaluate(fitness);
-                    update_global_best(generation);
-                    print_best_fitness(generation);
+                    stats = compute_generation_stats();
+                    update_global_best(generation, stats);
+                    print_best_fitness(generation, stats);
 
                 }
 
@@ -342,16 +296,98 @@ namespace ga::core {
                 PopulationEvaluator& evaluator
             ) {
                 evaluate_with(evaluator);
-                update_global_best(0);
-                print_best_fitness(0);
+                GenerationStats stats = compute_generation_stats();
+                update_global_best(0, stats);
+                print_best_fitness(0, stats);
 
                 for (std::size_t generation = 1; generation <= generations; generation++) {
                     select();
-                    reproduce(generation);
+                    reproduce(stats.elite_indices);
                     evaluate_with(evaluator);
-                    update_global_best(generation);
-                    print_best_fitness(generation);
+                    stats = compute_generation_stats();
+                    update_global_best(generation, stats);
+                    print_best_fitness(generation, stats);
 
+                }
+
+                print_global_best_fitness();
+            }
+
+            template<
+                typename PopulationEvaluator,
+                typename ParameterController,
+                typename PopulationInitializer
+            >
+            requires ga::concepts::CudaPopulationInitializerConcept<
+                PopulationInitializer,
+                GeneType
+            >
+            void run_with(
+                std::size_t generations,
+                PopulationEvaluator& evaluator,
+                ParameterController& parameter_controller,
+                PopulationInitializer population_initializer,
+                unsigned long seed = 1234
+
+            )
+            {
+                evaluate_with(evaluator);
+                GenerationStats stats = compute_generation_stats();
+                update_global_best(0, stats);
+                print_best_fitness(0, stats);
+
+                double last_previous_best_fitness = global_best_fitness;
+                double last_current_best_fitness  = global_best_fitness;
+
+                plotter.add_record(
+                    0,
+                    stats.best_fitness,
+                    global_best_fitness,
+                    mutation.mutation_rate,
+                    mutation.eta,
+                    crossover.eta,
+                    population.size()
+                );
+
+                for (std::size_t generation = 1; generation <= generations; generation++){
+                    select();
+                    reproduce(stats.elite_indices);
+
+                    parameter_controller.update(
+                        last_previous_best_fitness,
+                        last_current_best_fitness,
+
+                        mutation,
+                        crossover,
+                        selection,
+                        fitness_comparator,
+
+                        population,
+                        population_initializer,
+                        elitism_count,
+                        seed + generation
+                    );
+
+                    evaluate_with(evaluator);
+
+                    const double previous_best_fitness = global_best_fitness;
+
+                    stats = compute_generation_stats();
+                    update_global_best(generation, stats);
+                    print_best_fitness(generation, stats);
+
+                    last_previous_best_fitness = previous_best_fitness;
+                    last_current_best_fitness  = global_best_fitness;
+
+                    plotter.add_record(
+                        generation,
+                        stats.best_fitness,
+                        global_best_fitness,
+                        mutation.mutation_rate,
+                        mutation.eta,
+                        crossover.eta,
+                        population.size()
+                    );
                 }
 
                 print_global_best_fitness();
@@ -370,38 +406,6 @@ namespace ga::core {
              *
              * @param generation Generation associated with the current population.
              */
-            void update_global_best(std::size_t generation) 
-            {
-                auto fitness_values = copy_fitness_to_host();
-
-                std::size_t best_index = 0;
-
-                for (std::size_t i = 1; i < population_size; i++)
-                {
-                    if (fitness_comparator.is_better(fitness_values[i], fitness_values[best_index]))
-                    {
-                        best_index = i;
-
-                    }
-
-                }
-
-                if (!has_global_best || fitness_comparator.is_better(fitness_values[best_index], global_best_fitness))
-                {
-                    has_global_best        = true;
-                    global_best_fitness    = fitness_values[best_index];
-                    global_best_generation = generation;
-
-                    global_best_chromosome.resize(chromosome_size);
-
-                    GA_CUDA_CHECK(cudaMemcpy(
-                        global_best_chromosome.data(),
-                        d_population + best_index * chromosome_size,
-                        chromosome_size * sizeof(GeneType),
-                        cudaMemcpyDeviceToHost
-                    ));
-                }
-            }
 
             /**
              * Prints the best solution found across all evaluated generations.
@@ -424,27 +428,17 @@ namespace ga::core {
              *
              * @param generation Generation index shown in the printed message.
              */
-            void print_best_fitness(std::size_t generation) const {
-                auto fitness_values = copy_fitness_to_host();
-
-                std::size_t best_index = 0;
-
-                for (std::size_t i = 1; i < population_size; i++) {
-                    if (fitness_comparator.is_better(
-                            fitness_values[i],
-                            fitness_values[best_index]
-                        )
-                    ) {
-                        best_index = i;
-                    }
-                }
-
-                std::cout << "Generation " << generation
-                        << " | best fitness = "
-                        << fitness_values[best_index]
-                        << "\n";
-
-            
+            void print_best_fitness(
+                std::size_t generation,
+                const GenerationStats& stats
+            ) const
+            {
+                std::cout
+                    << "Generation "
+                    << generation
+                    << " | best fitness = "
+                    << stats.best_fitness
+                    << "\n";
             }
 
             /**
@@ -496,17 +490,17 @@ namespace ga::core {
             {
                 auto h_population = copy_population_to_host();
 
-                for (std::size_t individual = 0; individual < population_size; individual++)
+                for (std::size_t individual = 0; individual < population.size(); individual++)
                 {
                     std::cout << "[";
 
-                    for (std::size_t allele = 0; allele < chromosome_size; allele++)
+                    for (std::size_t allele = 0; allele < population.chromosome_length(); allele++)
                     {
-                        std::size_t index = individual * chromosome_size + allele;
+                        std::size_t index = individual * population.chromosome_length() + allele;
 
                         std::cout << h_population[index];
 
-                        if (allele < chromosome_size - 1)
+                        if (allele < population.chromosome_length() - 1)
                         {
                             std::cout << ", ";
                         }
@@ -517,52 +511,63 @@ namespace ga::core {
             }
 
         private:
-            std::size_t population_size;
-            std::size_t chromosome_size;
-            std::size_t total_genes;
+            Population& population;
+            ga::utils::GATelemetry plotter;
+            
             std::size_t elitism_count;
+            float crossover_rate;
 
             Mutation mutation;
             Crossover crossover;
             Selection selection;
             FitnessComparator fitness_comparator;
 
-            GeneType* d_population      = nullptr;
-            GeneType* d_next_population = nullptr;
-
             double* d_fitness_values = nullptr;
 
             int* d_parent_a_indices = nullptr;
             int* d_parent_b_indices = nullptr;
+            unsigned char* d_pair_crosses = nullptr;
 
-            curandState* d_rng_states = nullptr;
+            curandState* d_pair_rng_states = nullptr;
 
             std::vector<GeneType> global_best_chromosome;
-            double global_best_fitness         = 0.0;
-            bool has_global_best               = false;
-            std::size_t global_best_generation = 0;
+            double global_best_fitness          = 0.0;
+            bool has_global_best                = false;
+            std::size_t global_best_generation  = 0;
 
             void validate()
             {
-                if (elitism_count >= population_size) {
+                if (crossover_rate < 0.0f || crossover_rate > 1.0f) {
+                    throw std::invalid_argument(
+                        "Crossover rate must be in [0, 1]."
+                    );
+                }
+
+                if (elitism_count >= population.size()) {
                     throw std::invalid_argument(
                         "Elitism count must be smaller than population size."
                     );
                 }
 
-                if (population_size < 2) {
+                if (elitism_count % 2 != 0) {
+                    throw std::invalid_argument(
+                        "CUDA GA currently requires even elitism count."
+                    );
+                }
+
+                if (population.size() < 2) {
                     throw std::invalid_argument(
                         "Population size must be at least 2."
                     );
                 }
 
-                if (population_size % 2 != 0) {
+                if (population.size() % 2 != 0) {
                     throw std::invalid_argument(
                         "CUDA GA currently requires even population size."
                     );
                 }
 
-                if (chromosome_size == 0) {
+                if (population.chromosome_length() == 0) {
                     throw std::invalid_argument(
                         "Chromosome size must be greater than 0."
                     );
@@ -572,46 +577,33 @@ namespace ga::core {
             void allocate() 
             {
                 GA_CUDA_CHECK(cudaMalloc(
-                    &d_population,
-                    total_genes * sizeof(GeneType)
-                ));
-
-                GA_CUDA_CHECK(cudaMalloc(
-                    &d_next_population,
-                    total_genes * sizeof(GeneType)
-                ));
-
-                GA_CUDA_CHECK(cudaMalloc(
                     &d_fitness_values,
-                    population_size * sizeof(double)
+                    population.capacity() * sizeof(double)
                 ));
 
                 GA_CUDA_CHECK(cudaMalloc(
                     &d_parent_a_indices,
-                    (population_size / 2) * sizeof(int)
+                    (population.capacity() / 2) * sizeof(int)
                 ));
 
                 GA_CUDA_CHECK(cudaMalloc(
                     &d_parent_b_indices,
-                    (population_size / 2) * sizeof(int)
+                    (population.capacity() / 2) * sizeof(int)
                 ));
 
                 GA_CUDA_CHECK(cudaMalloc(
-                    &d_rng_states,
-                    total_genes * sizeof(curandState)
+                    &d_pair_crosses,
+                    (population.capacity() / 2) * sizeof(unsigned char)
+                ));
+
+                GA_CUDA_CHECK(cudaMalloc(
+                    &d_pair_rng_states,
+                    (population.capacity() / 2) * sizeof(curandState)
                 ));
             }
 
             void release() 
             {
-                if (d_population) {
-                    cudaFree(d_population);
-                }
-
-                if (d_next_population) {
-                    cudaFree(d_next_population);
-                }
-
                 if (d_fitness_values) {
                     cudaFree(d_fitness_values);
                 }
@@ -624,22 +616,95 @@ namespace ga::core {
                     cudaFree(d_parent_b_indices);
                 }
 
-                if (d_rng_states) {
-                    cudaFree(d_rng_states);
+                if (d_pair_crosses) {
+                    cudaFree(d_pair_crosses);
+                }
+
+                if (d_pair_rng_states) {
+                    cudaFree(d_pair_rng_states);
                 }
             }
 
-            std::vector<std::size_t> find_elite_indices_host() const
+            void copy_elites_to_next_population(
+                const std::vector<std::size_t>& elite_indices
+            )
+            {
+                for (std::size_t elite_position = 0; elite_position < elite_indices.size(); elite_position++)
+                {
+                    std::size_t source_index = elite_indices[elite_position];
+
+                    const GeneType* source = population.data() + source_index * population.chromosome_length();
+
+                    GeneType* destination = population.next_data() + (elite_position + (population.size() - elitism_count)) * population.chromosome_length();
+
+                    GA_CUDA_CHECK(cudaMemcpy(
+                        destination,
+                        source,
+                        population.chromosome_length() * sizeof(GeneType),
+                        cudaMemcpyDeviceToDevice
+                    ));
+                }
+            }
+
+            std::vector<double> copy_fitness_to_host() const {
+                std::vector<double> host_fitness(population.size());
+
+                GA_CUDA_CHECK(cudaMemcpy(
+                    host_fitness.data(),
+                    d_fitness_values,
+                    population.size() * sizeof(double),
+                    cudaMemcpyDeviceToHost
+                ));
+
+                return host_fitness;
+            }
+
+            std::vector<GeneType> copy_population_to_host() const
+            {
+                return population.copy_to_host();
+            }
+
+            GenerationStats compute_generation_stats() const
+            {
+                const std::vector<double> fitness_values = copy_fitness_to_host();
+
+                GenerationStats stats;
+
+                stats.best_index    = find_best_index_from_fitness(fitness_values);
+                stats.best_fitness  = fitness_values[stats.best_index];
+                stats.elite_indices = find_elite_indices_from_fitness(fitness_values);
+
+                return stats;
+            }
+
+
+            std::size_t find_best_index_from_fitness(
+                const std::vector<double>& fitness_values
+            ) const
+            {
+                std::size_t best_index = 0;
+
+                for (std::size_t i = 1; i < population.size(); i++){
+                    if (fitness_comparator.is_better(fitness_values[i], fitness_values[best_index] )){
+                        best_index = i;
+                    }
+                }
+
+                return best_index;
+            }
+
+
+            std::vector<std::size_t> find_elite_indices_from_fitness(
+                const std::vector<double>& fitness_values
+            ) const
             {
                 std::vector<std::size_t> elite_indices;
 
-                if (elitism_count == 0) {
+                if (elitism_count == 0){
                     return elite_indices;
                 }
 
-                auto fitness_values = copy_fitness_to_host();
-
-                std::vector<std::size_t> indices(population_size);
+                std::vector<std::size_t> indices(population.size());
 
                 std::iota(
                     indices.begin(),
@@ -651,7 +716,11 @@ namespace ga::core {
                     indices.begin(),
                     indices.begin() + elitism_count,
                     indices.end(),
-                    [this, &fitness_values](std::size_t a, std::size_t b) {
+                    [this, &fitness_values](
+                        std::size_t a,
+                        std::size_t b
+                    )
+                    {
                         return fitness_comparator.is_better(
                             fitness_values[a],
                             fitness_values[b]
@@ -667,52 +736,43 @@ namespace ga::core {
                 return elite_indices;
             }
 
-            void copy_elites_to_next_population(
-                const std::vector<std::size_t>& elite_indices
+
+            void update_global_best(
+                std::size_t generation,
+                const GenerationStats& stats
             )
             {
-                for (std::size_t elite_position = 0; elite_position < elite_indices.size(); elite_position++)
+                const bool improved =
+                    !has_global_best ||
+                    fitness_comparator.is_better(
+                        stats.best_fitness,
+                        global_best_fitness
+                    );
+
+                if (!improved)
                 {
-                    std::size_t source_index = elite_indices[elite_position];
-
-                    const GeneType* source = d_population + source_index * chromosome_size;
-
-                    GeneType* destination = d_next_population + (elite_position + (population_size - elitism_count)) * chromosome_size;
-
-                    GA_CUDA_CHECK(cudaMemcpy(
-                        destination,
-                        source,
-                        chromosome_size * sizeof(GeneType),
-                        cudaMemcpyDeviceToDevice
-                    ));
+                    return;
                 }
-            }
 
-            std::vector<double> copy_fitness_to_host() const {
-                std::vector<double> host_fitness(population_size);
+                has_global_best        = true;
+                global_best_fitness    = stats.best_fitness;
+                global_best_generation = generation;
 
-                GA_CUDA_CHECK(cudaMemcpy(
-                    host_fitness.data(),
-                    d_fitness_values,
-                    population_size * sizeof(double),
-                    cudaMemcpyDeviceToHost
-                ));
-
-                return host_fitness;
-            }
-
-            std::vector<GeneType> copy_population_to_host() const {
-                std::vector<GeneType> h_population(total_genes);
+                global_best_chromosome.resize(
+                    population.chromosome_length()
+                );
 
                 GA_CUDA_CHECK(cudaMemcpy(
-                    h_population.data(),
-                    d_population,
-                    total_genes * sizeof(GeneType),
+                    global_best_chromosome.data(),
+                    population.data()
+                        + stats.best_index * population.chromosome_length(),
+                    population.chromosome_length() * sizeof(GeneType),
                     cudaMemcpyDeviceToHost
                 ));
-
-                return h_population;
             }
+
+
+            
     };
 
 }

@@ -3,9 +3,12 @@
 #include "ga/core/CudaGeneticAlgorithm.hpp"
 
 #include "ga/core/CudaFitnessComparator.hpp"
-#include "ga/operators/mutation/CudaGaussianMutation.hpp"
-#include "ga/operators/crossover/CudaUniformCrossover.hpp"
+#include "ga/population/CudaUniformPopulation.cuh"
+#include "ga/population/CudaPopulationManager.hpp"
+#include "ga/operators/mutation/CudaPolynomialMutation.hpp"
+#include "ga/operators/crossover/CudaSBXCrossover.hpp"
 #include "ga/operators/selection/CudaTournamentSelection.hpp"
+#include "ga/control/CudaSimpleParameterController.hpp"
 
 #include "graph/Graph.hpp"
 #include "sparse/DeviceWeightedLaplacian.cuh"
@@ -17,6 +20,8 @@ using namespace ga::core;
 using namespace ga::mutation;
 using namespace ga::crossover;
 using namespace ga::selection;
+using namespace ga::population;
+using namespace ga::control;
 
 using namespace ctqw::graph;
 using namespace ctqw::sparse;
@@ -59,21 +64,26 @@ int main() {
     // ---------------------------------------------------------------------
     // Genetic algorithm configuration
     // ---------------------------------------------------------------------
-    const size_t population_size  = 16;
-    const size_t generation_count = 512;
-    const size_t elitism_count    = 1;
-
+    const size_t initial_population_size  = 16;
+    const size_t max_population_size      = 16;
+    const size_t generation_count = 8192;
+    const size_t elitism_count    = 4;
+    
     // ---------------------------------------------------------------------
     // Gene / weight bounds
     // ---------------------------------------------------------------------
     const float min_edge_weight = 0.0f;
-    const float max_edge_weight = 2.0f;
+    const float max_edge_weight = 5.0f;
 
     // ---------------------------------------------------------------------
     // Genetic operators configuration
     // ---------------------------------------------------------------------
-    const float mutation_sigma   = 0.085f;
+    const float crossover_rate   = 0.90f;
+    const float crossover_eta    = 15.0f;
+
+    const float mutation_eta     = 20.0f;
     const float mutation_rate    = 0.01f;
+
     const size_t tournament_size = 2;
 
     // ---------------------------------------------------------------------
@@ -94,6 +104,91 @@ int main() {
     cout << "Number of edges    = " << graph.edge_count() << "\n";
 
     // ---------------------------------------------------------------------
+    // Parameter Control
+    // ---------------------------------------------------------------------
+    CudaSimpleParameterController parameter_controller;
+
+    const float inv_edge_count =
+        1.0f / static_cast<float>(graph.edge_count());
+
+    parameter_controller.max_population_size = max_population_size;
+
+    // Estagnação
+    parameter_controller.stagnation_threshold         = 8;
+    parameter_controller.strong_stagnation_threshold  = 24;
+
+    parameter_controller.improvement_epsilon = 1.0e-4;
+    parameter_controller.strong_improvement_threshold = 0.01f;
+
+    // Mutação:
+    // min = ~1 gene mutado por cromossomo
+    // max = ~50 genes mutados por cromossomo
+    parameter_controller.min_mutation_rate = 1.0f  * inv_edge_count;
+    parameter_controller.max_mutation_rate = 50.0f * inv_edge_count;
+
+    // Eta da mutação polinomial:
+    // eta baixo  -> saltos grandes
+    // eta alto   -> ajustes locais
+    parameter_controller.min_mutation_eta = 3.0f;
+    parameter_controller.max_mutation_eta = 60.0f;
+
+    // Eta do SBX:
+    // eta baixo  -> filhos mais espalhados
+    // eta alto   -> filhos próximos dos pais
+    parameter_controller.min_crossover_eta = 3.0f;
+    parameter_controller.max_crossover_eta = 60.0f;
+
+    // ---------------------------------------------------------------------
+    // Weak improvement
+    // Melhorou pouco:
+    // - reduz levemente mutação
+    // - aumenta levemente eta
+    // - não muda população
+    // ---------------------------------------------------------------------
+    parameter_controller.improvement_mutation_rate_factor = 0.995f;
+    parameter_controller.improvement_mutation_eta_factor  = 1.003f;
+    parameter_controller.improvement_crossover_eta_factor = 1.003f;
+    parameter_controller.improvement_population_delta     = 0;
+
+    // ---------------------------------------------------------------------
+    // Strong improvement
+    // Melhorou bastante:
+    // - entra em exploração local
+    // - reduz mutação
+    // - aumenta eta
+    // - NÃO reduz população ainda
+    // ---------------------------------------------------------------------
+    
+    parameter_controller.strong_improvement_mutation_rate_factor = 0.95f;
+    parameter_controller.strong_improvement_mutation_eta_factor  = 1.05f;
+    parameter_controller.strong_improvement_crossover_eta_factor = 1.03f;
+    parameter_controller.strong_improvement_population_delta     = 0;
+
+    // ---------------------------------------------------------------------
+    // Weak stagnation
+    // Estagnou moderadamente:
+    // - aumenta mutação
+    // - reduz eta
+    // - adiciona poucos indivíduos
+    // ---------------------------------------------------------------------
+    parameter_controller.stagnation_mutation_rate_factor = 1.20f;
+    parameter_controller.stagnation_mutation_eta_factor  = 0.90f;
+    parameter_controller.stagnation_crossover_eta_factor = 0.92f;
+    parameter_controller.stagnation_population_delta     = 0;
+
+    // ---------------------------------------------------------------------
+    // Strong stagnation
+    // Estagnou muito:
+    // - aumenta mais mutação
+    // - reduz mais eta
+    // - adiciona mais indivíduos
+    // ---------------------------------------------------------------------
+    parameter_controller.strong_stagnation_mutation_rate_factor = 1.45f;
+    parameter_controller.strong_stagnation_mutation_eta_factor  = 0.75f;
+    parameter_controller.strong_stagnation_crossover_eta_factor = 0.80f;
+    parameter_controller.strong_stagnation_population_delta     = 0;
+
+    // ---------------------------------------------------------------------
     // CTQW evaluator
     // ---------------------------------------------------------------------
     const size_t chromosome_size = graph.edge_count();
@@ -101,6 +196,7 @@ int main() {
     DeviceWeightedLaplacian device_laplacian(graph);
 
     CtqwFitnessEvaluator ctqw_evaluator(
+        max_population_size,
         norm_penalty,
         transfer_problem,
         device_laplacian
@@ -109,36 +205,55 @@ int main() {
     // ---------------------------------------------------------------------
     // Genetic algorithm
     // ---------------------------------------------------------------------
+    CudaPopulationManager<float> population_manager(
+        initial_population_size,
+        max_population_size,
+        chromosome_size
+    );
+
     CudaGeneticAlgorithm<
         float,
-        CudaGaussianMutation,
-        CudaUniformCrossover,
+        CudaPopulationManager<float>,
+        CudaPolynomialMutation,
+        CudaSBXCrossover,
         CudaTournamentSelection,
         CudaMaximizeFitness
     > ga(
-        population_size,
-        chromosome_size,
         elitism_count,
-        CudaGaussianMutation(
+        crossover_rate,
+        population_manager,
+        CudaPolynomialMutation(
             min_edge_weight,
             max_edge_weight,
-            mutation_sigma,
+            mutation_eta,
             mutation_rate
         ),
-        CudaUniformCrossover{},
+        CudaSBXCrossover(
+            min_edge_weight,
+            max_edge_weight,
+            crossover_eta
+        ),
         CudaTournamentSelection(tournament_size),
-        CudaMaximizeFitness{}
+        CudaMaximizeFitness()
     );
 
-    ga.create_uniform_population(
-        min_edge_weight,
-        max_edge_weight,
+    ga.create_population(
+        CudaUniformPopulation(
+            min_edge_weight,
+            max_edge_weight
+        ), 
         rng_seed
     );
 
     ga.run_with(
-        generation_count,
-        ctqw_evaluator
+        generation_count, 
+        ctqw_evaluator, 
+        parameter_controller, 
+        CudaUniformPopulation(
+            min_edge_weight,
+            max_edge_weight
+        ), 
+        rng_seed
     );
 
     // ---------------------------------------------------------------------

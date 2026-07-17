@@ -6,11 +6,14 @@
 #include "ga/core/CudaGeneticAlgorithm.hpp"
 
 #include "ga/core/CudaFitnessComparator.hpp"
+#include "ga/population/CudaPopulationManager.hpp"
+#include "ga/population/CudaUniformPopulation.cuh"
 #include "ga/operators/mutation/CudaGaussianMutation.hpp"
 #include "ga/operators/crossover/CudaUniformCrossover.hpp"
 #include "ga/operators/selection/CudaTournamentSelection.hpp"
 
 using namespace ga::core;
+using namespace ga::population;
 using namespace ga::mutation;
 using namespace ga::crossover;
 using namespace ga::selection;
@@ -39,29 +42,47 @@ class TargetMaxFitness {
 int main() {
     unsigned int seed = 2324;
     
-    int elite_count = 1;
-    const size_t population_size = 32;
-    const size_t chromosome_size = 50;
+    int elite_count = 2;
+    const size_t initial_population_size = 16;
+    const size_t max_population_size     = 500;
+    const size_t chromosome_size         = 50;
+    const float crossover_rate           = 0.9f;
 
     TargetMaxFitness fitness;
 
+    CudaPopulationManager<float> population_manager(
+        initial_population_size,
+        max_population_size,
+        chromosome_size
+    );
+
     CudaGeneticAlgorithm<
         float,
+        CudaPopulationManager<float>,
         CudaGaussianMutation,
         CudaUniformCrossover,
         CudaTournamentSelection,
         CudaMinimizeFitness
     > ga(
-        population_size,
-        chromosome_size,
         elite_count,
+        crossover_rate,
+        population_manager,
         CudaGaussianMutation(-10.0f, 10.0f, 0.1f, 0.01f),
-        CudaUniformCrossover{},
+        CudaUniformCrossover(),
         CudaTournamentSelection(2),
-        CudaMinimizeFitness{}
+        CudaMinimizeFitness()
     );
     
-    ga.create_uniform_population(-10.0f, 10.0f, seed);
+    ga.create_population(
+        CudaUniformPopulation(
+            -10.0f,
+            +10.0f
+        ),
+        seed
+    );
+
+    ga.print_population();
+
     ga.run<TargetMaxFitness>(10000, fitness);
 
     cout << "Best fitness = "    << ga.best_fitness() << "\n";

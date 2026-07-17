@@ -6,7 +6,7 @@
             "intelliSenseMode": "linux-gcc-x64",
             "cppStandard": "c++20",
             "cStandard": "c17",
-            "compileCommands": "/home/wallace/Documentos/Genetic-Algorithm-CUDA/build/compile_commands.json",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
             "includePath": [
                 "/home/wallace/Documentos/Genetic-Algorithm-CUDA/include",
                 "/opt/nvidia/hpc_sdk/Linux_x86_64/25.1/cuda/12.6/include"

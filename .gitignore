@@ -1,0 +1,46 @@
+# Build
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Executables / binaries
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.bin
+
+# CUDA temporary files
+*.ptx
+*.cubin
+*.fatbin
+
+# Generated outputs
+ga_telemetry.csv
+input_graph.txt
+output_graph.txt
+*.log
+
+# Generated docs
+docs/
+html/
+latex/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor configs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

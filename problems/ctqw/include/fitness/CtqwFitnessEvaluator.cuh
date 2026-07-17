@@ -1,28 +1,30 @@
 #pragma once
 
 #include <cstddef>
-#include <vector>
+
+#include <cuComplex.h>
 
 #include "problem/TransferProblem.hpp"
-#include "problem/StateTransferEvaluator.cuh"
 #include "sparse/DeviceWeightedLaplacian.cuh"
 
 namespace ctqw::fitness {
 
-    /**
-     * @brief Fitness adapter between the CUDA GA and the CTQW transfer problem.
-     *
-     * Each chromosome is interpreted as the current edge-weight vector for a
-     * fixed graph topology. The Laplacian is not materialized as CSR values;
-     * the solver applies L(w) directly from the graph adjacency structure.
-     */
     class CtqwFitnessEvaluator {
         public:
             CtqwFitnessEvaluator(
+                std::size_t max_population_size,
                 float norm_penalty,
                 ctqw::problem::TransferProblem problem,
                 const ctqw::sparse::DeviceWeightedLaplacian& laplacian
             );
+
+            ~CtqwFitnessEvaluator();
+
+            CtqwFitnessEvaluator(const CtqwFitnessEvaluator&) = delete;
+            CtqwFitnessEvaluator& operator=(const CtqwFitnessEvaluator&) = delete;
+
+            CtqwFitnessEvaluator(CtqwFitnessEvaluator&&) = delete;
+            CtqwFitnessEvaluator& operator=(CtqwFitnessEvaluator&&) = delete;
 
             void evaluate_population(
                 const float* d_population,
@@ -30,17 +32,32 @@ namespace ctqw::fitness {
                 std::size_t population_size,
                 std::size_t chromosome_size
             );
-            
+
         private:
             float norm_penalty;
 
             ctqw::problem::TransferProblem problem;
             const ctqw::sparse::DeviceWeightedLaplacian& laplacian;
-            ctqw::problem::StateTransferEvaluator transfer_evaluator;
 
-            std::vector<double> h_fitness_values;
+            int n = 0;
+            
+            std::size_t allocated_population_size = 0;
 
-            double evaluate_one_individual(const float* d_weights);
+            cuComplex* d_psi  = nullptr;
+            cuComplex* d_temp = nullptr;
+            cuComplex* d_k1   = nullptr;
+            cuComplex* d_k2   = nullptr;
+            cuComplex* d_k3   = nullptr;
+            cuComplex* d_k4   = nullptr;
+
+            void reserve_workspace(std::size_t max_population_size);
+            void release_workspace();
+
+            void evolve_population(
+                const float* d_population,
+                std::size_t population_size,
+                std::size_t chromosome_size
+            );
     };
 
 }
